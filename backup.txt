@@ -1,0 +1,966 @@
+/*
+Rec. the Door
+
+CS585 Image and Video Computing Fall 2017
+
+*/
+
+#include "stdafx.h"
+#include "opencv2/core/core.hpp"
+#include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/highgui/highgui.hpp"
+#include "opencv2/objdetect/objdetect.hpp"
+#include "opencv2/features2d/features2d.hpp"
+#include <string>
+#include <vector>
+#include <iostream>
+#define _USE_MATH_DEFINES
+#include <math.h>
+#include <stack>
+
+using namespace cv;
+using namespace std;
+
+// track bar function used for optimal values
+void mybar(int trackbarValue, void* data);
+
+Mat original, myResult1;
+int trackBarVal1 = 0;
+int trackBarVal2 = 0;
+int trackBarVal3 = 0;
+int maxBarValue = 100;
+
+// helper functions 
+void convertHSL(int b, int g, int r, int& hue, int& sat, int& lit);
+void OrMat(const Mat& input1, const Mat& input2, Mat& rst);
+void colorHash(int id, Scalar& color);
+void findFirstBlackPixel(const Mat& flood_rst, const Point& matchLoc, Point& blackLoc);
+void drawConnecttedFromPoint(Mat& original, const Mat& flood_rst, Point& blackLoc);
+
+// edge detection main functions
+void EdgeDetection(const Mat& src, Mat& rst, int thresh_hue, int thresh_sat, int thresh_lit);
+void SobelEdgeDetectionHue(const Mat& src, Mat& rst, int thresh_hue);
+void SobelEdgeDetection(const Mat& src, Mat& rst, int thresh_hue);
+
+// FloodFill function
+void myFloodFill(const Mat &img, vector <vector<Point2i>> &blobs);
+
+// Template match function
+void tpmatch(Mat& final_display, Point& matchLoc, Mat templ1, Mat templ2, Mat templ3, Mat& cmp, const int& draw_ctr);
+
+// Leng Gong functions
+void BoxHandle(const Mat& myResult2, Point& start, Point& end);
+void myrect(Mat &img, Point matchLoc, Point endLoc, int r, int g, int b, int thick);
+void myfindconnected(const Mat &img, vector <vector<Point2i>> &blobs, vector<Rect> &regions);
+
+
+int main()
+{
+	// Control signals
+	int window_choice = 0;
+	double max_img_pixel = 900.0;
+	int write_ctr = 1;
+	int draw_box_ctr = 0;
+	int draw_largest_blob = 1;
+	int debug_draw_ctr = 0;
+
+	// Input images
+	original = imread("./door/door_1.jpg");
+	cout << original.rows << " col  " << original.cols << endl;
+	Mat temp3 = imread("./door/template_doorknob_right.png");
+	Mat temp2, temp4;
+
+	// Scale the template image
+	int col_l2 = temp3.cols * 3 / 4; 	int row_l2 = temp3.rows * 3 / 4;
+	int col_l4 = temp3.cols * 4 / 3; 	int row_l4 = temp3.rows * 4 / 3;
+	Size size2(row_l2, col_l2);
+	Size size4(row_l4, col_l4);
+	resize(temp3, temp2, size2);
+	resize(temp3, temp4, size4);
+
+	// Scale the input image if the size is too large 
+	double scale = 1.0;
+	int max_side = original.cols;
+	if (original.rows > original.cols)
+		max_side = original.rows;
+	if (max_side > max_img_pixel)
+		scale = max_img_pixel / max_side;
+	int resize_row = original.rows*scale;
+	int resize_col = original.cols*scale;
+	cout << "scale " << scale << " r " << resize_row << " c " << resize_col << endl;
+	Size our_resize_num(resize_col, resize_row);
+	resize(original, original, our_resize_num);
+
+
+	cout << "row " << original.rows << " col  " << original.cols << endl;
+
+	// initialize some output images
+	myResult1.create(original.rows, original.cols, CV_8UC1);
+	Mat flood_rst = Mat::zeros(myResult1.size(), CV_8UC3);
+	Mat output = Mat::zeros(original.size(), CV_8UC3);
+
+	if (window_choice == 1) {
+		namedWindow("Original", WINDOW_NORMAL);
+		namedWindow("My Result1", WINDOW_NORMAL);
+		namedWindow("My Result2", WINDOW_NORMAL);
+		//namedWindow("Output", WINDOW_NORMAL);
+	}
+	else {
+		namedWindow("Original", 1);
+		namedWindow("My Result1", 1);
+		namedWindow("My Result2", 1);
+		//namedWindow("Output", 1);
+	}
+
+	//Detect edge of the input image
+	Mat gray;
+	cvtColor(original, gray, cv::COLOR_BGR2GRAY);
+	SobelEdgeDetection(gray, myResult1, 50);
+	//SobelEdgeDetectionHue(original, myResult1, 95);
+	//EdgeDetection(original, normal_d, 12, 14, 17);
+
+	cout << " r1 row " << myResult1.rows << " r1 col " << myResult1.cols << endl;
+
+	// Flood fill the binary image with white edge and black backgroud
+	vector <vector<Point2i>> blobs;
+	myFloodFill(myResult1, blobs);
+
+
+	Point matchLoc, blackLoc;
+	if (draw_largest_blob == 1) {
+
+		// Color the largest connected region
+		int largest_component = 0; int largest_size = 0;
+		for (size_t i = 0; i < blobs.size(); i++) {
+			if (blobs[i].size() > largest_size) {
+				largest_size = blobs[i].size();
+				largest_component = i;
+			}
+		}
+		Scalar color;
+		colorHash(5, color);
+		for (int k = 0; k < blobs[largest_component].size(); k++) {
+			flood_rst.at<Vec3b>(blobs[largest_component][k].x, blobs[largest_component][k].y)[0] = color[0];
+			flood_rst.at<Vec3b>(blobs[largest_component][k].x, blobs[largest_component][k].y)[1] = color[1];
+			flood_rst.at<Vec3b>(blobs[largest_component][k].x, blobs[largest_component][k].y)[2] = color[2];
+		}
+
+		// Closing for better output
+		int erosion_size = 1;
+		int dilation_size = 1;
+		Mat element = getStructuringElement(MORPH_RECT,
+			Size(2 * erosion_size + 1, 2 * erosion_size + 1),
+			Point(erosion_size, erosion_size));
+		//perform erosions and dilations
+		dilate(flood_rst, flood_rst, element);
+		dilate(flood_rst, flood_rst, element);
+		dilate(flood_rst, flood_rst, element);
+		erode(flood_rst, flood_rst, element);
+		erode(flood_rst, flood_rst, element);
+
+		// Template match to find the doorknob
+		tpmatch(original, matchLoc, temp2, temp3, temp4, flood_rst, draw_box_ctr);
+
+		// Draw solid color on top of the doorknob found
+		//cout << "Match " << matchLoc.x << " " << matchLoc.y << endl;
+		findFirstBlackPixel(flood_rst, matchLoc, blackLoc);
+		//cout << "Black " << blackLoc.x << " " << blackLoc.y << endl;
+		drawConnecttedFromPoint(original, flood_rst, blackLoc);
+		//cout << " flood r " << flood_rst.rows << " flood c " << flood_rst.cols << endl;
+	}
+	else {
+		vector <int> large_component_index;
+		for (size_t i = 0; i < blobs.size(); i++) {
+			if (blobs[i].size() > 100)
+				large_component_index.push_back(i);
+		}
+		for (int h = 0; h < large_component_index.size(); h++) {
+			Scalar color;
+			colorHash(h + 10, color);
+			for (int k = 0; k < blobs[large_component_index[h]].size(); k++) {
+				flood_rst.at<Vec3b>(blobs[large_component_index[h]][k].x, blobs[large_component_index[h]][k].y)[0] = color[0];
+				flood_rst.at<Vec3b>(blobs[large_component_index[h]][k].x, blobs[large_component_index[h]][k].y)[1] = color[1];
+				flood_rst.at<Vec3b>(blobs[large_component_index[h]][k].x, blobs[large_component_index[h]][k].y)[2] = color[2];
+			}
+		}
+	}
+
+
+	if (write_ctr == 1) {
+		imwrite("r1.png", original);
+		imwrite("r2.png", myResult1);
+		imwrite("r3.png", flood_rst);
+	}
+
+	if (debug_draw_ctr == 1) {
+		for (int k = 0; k < 10; k++) {
+			for (int i = 0; i < 10; i++) {
+				flood_rst.at<Vec3b>(matchLoc.x + k, matchLoc.y + i)[0] = 255;
+				flood_rst.at<Vec3b>(matchLoc.x + k, matchLoc.y + i)[1] = 0;
+				flood_rst.at<Vec3b>(matchLoc.x + k, matchLoc.y + i)[2] = 0;
+			}
+		}
+	}
+
+	//The real work of the program is done in the onTrackbar function in response to the slider value
+	//createTrackbar("Hue_thresh", "Original", &trackBarVal1, 230, mybar);
+	//createTrackbar("Sat_thresh", "Original", &trackBarVal2, 100, mybar);
+	//createTrackbar("Lit_thresh", "Original", &trackBarVal3, 100, mybar);
+
+	while (1 == 1)
+	{
+		imshow("Original", original);
+		imshow("My Result1", myResult1);
+		imshow("My Result2", flood_rst);
+		//imshow("Output", fff);
+		char key = waitKey(33);
+		if (key == ' ')
+		{
+			break;
+		}
+	}
+
+	return 0;
+}
+
+void mybar(int trackbarValue, void* data) {
+	//EdgeDetection(original, myResult1, trackBarVal1, trackBarVal2, trackBarVal3);
+	//EdgeDetection(no, myResult2, trackBarVal1, trackBarVal2, trackBarVal3);
+
+	Mat gray;
+	cvtColor(original, gray, cv::COLOR_BGR2GRAY);
+	SobelEdgeDetection(gray, myResult1, trackBarVal1);
+}
+
+void EdgeDetection(const Mat& src, Mat& rst, int thresh_hue, int thresh_sat, int thresh_lit) {
+	rst = Mat::zeros(src.size(), CV_8UC1);
+	for (int i = 0; i < src.rows; i++) {
+		for (int j = 0; j < src.cols - 1; j++) {
+			int b_curr = src.at<Vec3b>(i, j)[0];
+			int b_next = src.at<Vec3b>(i, j + 1)[0];
+			int g_curr = src.at<Vec3b>(i, j)[1];
+			int g_next = src.at<Vec3b>(i, j + 1)[1];
+			int r_curr = src.at<Vec3b>(i, j)[2];
+			int r_next = src.at<Vec3b>(i, j + 1)[2];
+			int h_curr, s_curr, l_curr;
+			int h_next, s_next, l_next;
+			convertHSL(b_curr, g_curr, r_curr, h_curr, s_curr, l_curr);
+			convertHSL(b_next, g_next, r_next, h_next, s_next, l_next);
+			if ((abs(h_curr - h_next) > thresh_hue) || (abs(s_curr - s_next) > thresh_sat) || (abs(l_curr - l_next) > thresh_lit))
+				rst.at<uchar>(i, j) = 255;
+		}
+	}
+	for (int j = 0; j < src.cols; j++) {
+		for (int i = 0; i < src.rows - 1; i++) {
+			int b_curr = src.at<Vec3b>(i, j)[0];
+			int b_next = src.at<Vec3b>(i + 1, j)[0];
+			int g_curr = src.at<Vec3b>(i, j)[1];
+			int g_next = src.at<Vec3b>(i + 1, j)[1];
+			int r_curr = src.at<Vec3b>(i, j)[2];
+			int r_next = src.at<Vec3b>(i + 1, j)[2];
+			int h_curr, s_curr, l_curr;
+			int h_next, s_next, l_next;
+			convertHSL(b_curr, g_curr, r_curr, h_curr, s_curr, l_curr);
+			convertHSL(b_next, g_next, r_next, h_next, s_next, l_next);
+			if ((abs(h_curr - h_next) > thresh_hue) || (abs(s_curr - s_next) > thresh_sat) || (abs(l_curr - l_next) > thresh_lit))
+				rst.at<uchar>(i, j) = 255;
+		}
+	}
+}
+
+void SobelEdgeDetection(const Mat& src, Mat& rst, int thresh_sob) {
+	rst = Mat::zeros(src.size(), CV_8UC1);
+	for (int i = 1; i < src.rows - 1; i++) {
+		for (int j = 1; j < src.cols - 1; j++) {
+			int gray1 = src.at<uchar>(i - 1, j - 1);
+			int gray2 = src.at<uchar>(i - 1, j);
+			int gray3 = src.at<uchar>(i - 1, j + 1);
+			int gray4 = src.at<uchar>(i, j - 1);
+			int gray5 = src.at<uchar>(i, j);
+			int gray6 = src.at<uchar>(i, j + 1);
+			int gray7 = src.at<uchar>(i + 1, j - 1);
+			int gray8 = src.at<uchar>(i + 1, j);
+			int gray9 = src.at<uchar>(i + 1, j + 1);
+			int sob_x = abs(gray1 + 2 * gray4 + gray7 - gray3 - 2 * gray6 - gray9);
+			int sob_y = abs(gray7 + 2 * gray8 + gray9 - gray1 - 2 * gray2 - gray3);
+			int sob_res = sqrt(sob_x * sob_x + sob_y * sob_y);
+			//rst.at<uchar>(i, j) = sob_res;
+			if (sob_res > thresh_sob)
+				rst.at<uchar>(i, j) = 255;
+		}
+	}
+
+	for (int i = 0; i < src.rows; i++) {
+		rst.at<uchar>(i, 0) = 255;
+		rst.at<uchar>(i, src.cols - 1) = 255;
+	}
+	for (int j = 0; j < src.cols; j++) {
+		rst.at<uchar>(0, j) = 255;
+		rst.at<uchar>(src.rows - 1, j) = 255;
+	}
+}
+
+void SobelEdgeDetectionHue(const Mat& src, Mat& rst, int thresh_sob) {
+	Mat hue_mat = Mat::zeros(src.size(), CV_8UC1);
+	rst = Mat::zeros(src.size(), CV_8UC1);
+	for (int i = 0; i < src.rows; i++) {
+		for (int j = 0; j < src.cols; j++) {
+			int b = src.at<Vec3b>(i, j)[0];
+			int g = src.at<Vec3b>(i, j)[1];
+			int r = src.at<Vec3b>(i, j)[2];
+			int h, s, l;
+			convertHSL(b, g, r, h, s, l);
+			hue_mat.at<uchar>(i, j) = h;
+		}
+	}
+	for (int i = 1; i < hue_mat.rows - 1; i++) {
+		for (int j = 1; j < hue_mat.cols - 1; j++) {
+			int gray1 = hue_mat.at<uchar>(i - 1, j - 1);
+			int gray2 = hue_mat.at<uchar>(i - 1, j);
+			int gray3 = hue_mat.at<uchar>(i - 1, j + 1);
+			int gray4 = hue_mat.at<uchar>(i, j - 1);
+			int gray5 = hue_mat.at<uchar>(i, j);
+			int gray6 = hue_mat.at<uchar>(i, j + 1);
+			int gray7 = hue_mat.at<uchar>(i + 1, j - 1);
+			int gray8 = hue_mat.at<uchar>(i + 1, j);
+			int gray9 = hue_mat.at<uchar>(i + 1, j + 1);
+			int sob_x = abs(gray1 + 2 * gray4 + gray7 - gray3 - 2 * gray6 - gray9);
+			int sob_y = abs(gray7 + 2 * gray8 + gray9 - gray1 - 2 * gray2 - gray3);
+			int sob_res = sqrt(sob_x * sob_x + sob_y * sob_y);
+			if (sob_res > thresh_sob)
+				rst.at<uchar>(i, j) = 255;
+		}
+	}
+}
+
+void myFloodFill(const Mat &img, vector <vector<Point2i>> &blobs) {
+	blobs.clear();
+	Mat imgcopy;
+	img.copyTo(imgcopy);
+	unsigned char wanted_val = 0;
+	stack<Point2i> mystack;
+
+	for (int i = 0; i < imgcopy.rows; i++) {
+		for (int j = 0; j < imgcopy.cols; j++) {
+			if (imgcopy.ptr<uchar>(i)[j] == wanted_val) {
+				//cout << "i=" << i << "\t j=" << j << "\t";
+				vector <Point2i> blob;
+				imgcopy.at<uchar>(i, j) = 255 - wanted_val;
+				Point2i myp;
+				myp.x = i;
+				myp.y = j;
+				mystack.push(myp);
+				blob.push_back(myp);
+
+				int size = 1;
+				Point2i pt2, pt4, pt5, pt6, pt8;
+				while (!mystack.empty()) {
+					pt5 = mystack.top();
+					mystack.pop();
+					if (pt5.x > 0) {
+						pt2.x = pt5.x - 1;
+					}
+					else {
+						pt2.x = pt5.x;
+					}
+					if (pt5.x < imgcopy.rows - 1) {
+						pt8.x = pt5.x + 1;
+					}
+					else {
+						pt8.x = pt5.x;
+					}
+					if (pt5.y > 0) {
+						pt4.y = pt5.y - 1;
+					}
+					else {
+						pt4.y = pt5.y;
+					}
+					if (pt5.y < imgcopy.cols - 1) {
+						pt6.y = pt5.y + 1;
+					}
+					else {
+						pt6.y = pt5.y;
+					}
+					pt4.x = pt5.x;			pt2.y = pt5.y;
+					pt6.x = pt5.x;			pt8.y = pt5.y;
+
+					if (imgcopy.at<uchar>(pt2.x, pt2.y) == wanted_val) {
+						imgcopy.at<uchar>(pt2.x, pt2.y) = 255 - wanted_val;
+						mystack.push(pt2);
+						blob.push_back(pt2);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt4.x, pt4.y) == wanted_val) {
+						imgcopy.at<uchar>(pt4.x, pt4.y) = 255 - wanted_val;
+						mystack.push(pt4);
+						blob.push_back(pt4);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt6.x, pt6.y) == wanted_val) {
+						imgcopy.at<uchar>(pt6.x, pt6.y) = 255 - wanted_val;
+						mystack.push(pt6);
+						blob.push_back(pt6);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt8.x, pt8.y) == wanted_val) {
+						imgcopy.at<uchar>(pt8.x, pt8.y) = 255 - wanted_val;
+						mystack.push(pt8);
+						blob.push_back(pt8);
+						size++;
+					}
+				}
+				//cout << "blob size=" << size << endl;;
+				//store the blob in the vector of blobs
+				blobs.push_back(blob);
+			}
+		}
+	}
+	cout << "total connected components found (including very small regions) =" << blobs.size() << endl;
+	//namedWindow("Trial");
+	//imshow("Trial", imgcopy);
+}
+
+void convertHSL(int b, int g, int r, int& hue, int& sat, int& lit) {
+
+	double B = b / 255.0;
+	double G = g / 255.0;
+	double R = r / 255.0;
+	double hsl_max, hsl_min, delta;
+
+	// find hue_max
+	if (B >= G && B >= R) hsl_max = B;
+	else if (G >= B && G >= R) hsl_max = G;
+	else hsl_max = R;
+
+	// find hue_min
+	if (B <= G && B <= R) hsl_min = B;
+	else if (G <= B && G <= R) hsl_min = G;
+	else hsl_min = R;
+
+	delta = hsl_max - hsl_min;
+
+	lit = (hsl_max + hsl_min) * 50;
+	double litt = (hsl_max + hsl_min) / 2;
+	if (delta == 0) sat = 0;
+	else sat = 100 * delta / (1 - abs(litt * 2 - 1));
+
+	if (delta == 0)	hue = 0;
+	else if (hsl_max == R) {
+		double temp = (G - B) / delta;
+		hue = 60 * temp;
+	}
+	else if (hsl_max == G)
+		hue = 60 * (((B - R) / delta) + 2);
+	else if (hsl_max == B)
+		hue = 60 * (((R - G) / delta) + 4);
+	else
+		cout << "HUE function error" << endl;
+
+	return;
+}
+
+void OrMat(const Mat& input1, const Mat& input2, Mat& rst) {
+	for (int i = 0; i < input1.rows; i++) {
+		for (int j = 0; j < input1.cols; j++) {
+			if (input1.at<uchar>(i, j) == 255)
+				rst.at<uchar>(i, j) = 255;
+			if (input2.at<uchar>(i, j) == 255)
+				rst.at<uchar>(i, j) = 255;
+		}
+	}
+}
+
+void colorHash(int id, Scalar& color) {
+	int r = (id * (id + 3)) % 256;
+	int g = (id * (id + 80)) % 256;
+	int b = (id * (id + 160)) % 256;
+	color = Scalar(b, g, r);
+}
+
+void findFirstBlackPixel(const Mat& flood_rst, const Point& matchLoc, Point& blackLoc) {
+	for (int i = matchLoc.y; i < flood_rst.cols; i++)
+	{
+		if (flood_rst.at<Vec3b>(matchLoc.x, i)[1] == 0)
+		{
+			blackLoc.x = matchLoc.x;
+			blackLoc.y = i;
+			return;
+		}
+	}
+}
+
+void drawConnecttedFromPoint(Mat& original, const Mat& flood_rst, Point& blackLoc) {
+
+	Mat imgcopy;
+	flood_rst.copyTo(imgcopy);
+	unsigned char wanted_val = 0;
+
+	stack<Point2i> mystack;
+	vector <Point2i> blob;
+	Point2i myp;
+	myp.x = blackLoc.x;
+	myp.y = blackLoc.y;
+	//cout << myp.x << " " << myp.y << "draw" << endl;
+	mystack.push(myp);
+	blob.push_back(myp);
+	original.at<Vec3b>(myp.x, myp.y)[0] = 0;
+	original.at<Vec3b>(myp.x, myp.y)[1] = 0;
+	original.at<Vec3b>(myp.x, myp.y)[2] = 255;
+	Point2i pt2, pt4, pt5, pt6, pt8;
+
+	while (!mystack.empty()) {
+		pt5 = mystack.top();
+		mystack.pop();
+		if (pt5.x > 0)
+			pt2.x = pt5.x - 1;
+		else
+			pt2.x = pt5.x;
+		if (pt5.x < imgcopy.rows - 1)
+			pt8.x = pt5.x + 1;
+		else
+			pt8.x = pt5.x;
+		if (pt5.y > 0)
+			pt4.y = pt5.y - 1;
+		else
+			pt4.y = pt5.y;
+		if (pt5.y < imgcopy.cols - 1)
+			pt6.y = pt5.y + 1;
+		else
+			pt6.y = pt5.y;
+		pt4.x = pt5.x;			pt2.y = pt5.y;
+		pt6.x = pt5.x;			pt8.y = pt5.y;
+
+		if (imgcopy.at<Vec3b>(pt2.x, pt2.y)[1] == wanted_val) {
+			imgcopy.at<Vec3b>(pt2.x, pt2.y)[1] = 255 - wanted_val;
+			mystack.push(pt2);
+			blob.push_back(pt2);
+			original.at<Vec3b>(pt2.x, pt2.y)[0] = 0;
+			original.at<Vec3b>(pt2.x, pt2.y)[1] = 0;
+			original.at<Vec3b>(pt2.x, pt2.y)[2] = 255;
+		}
+		if (imgcopy.at<Vec3b>(pt4.x, pt4.y)[1] == wanted_val) {
+			imgcopy.at<Vec3b>(pt4.x, pt4.y)[1] = 255 - wanted_val;
+			mystack.push(pt4);
+			blob.push_back(pt4);
+			original.at<Vec3b>(pt4.x, pt4.y)[0] = 0;
+			original.at<Vec3b>(pt4.x, pt4.y)[1] = 0;
+			original.at<Vec3b>(pt4.x, pt4.y)[2] = 255;
+		}
+		if (imgcopy.at<Vec3b>(pt6.x, pt6.y)[1] == wanted_val) {
+			imgcopy.at<Vec3b>(pt6.x, pt6.y)[1] = 255 - wanted_val;
+			mystack.push(pt6);
+			blob.push_back(pt6);
+			original.at<Vec3b>(pt6.x, pt6.y)[0] = 0;
+			original.at<Vec3b>(pt6.x, pt6.y)[1] = 0;
+			original.at<Vec3b>(pt6.x, pt6.y)[2] = 255;
+		}
+		if (imgcopy.at<Vec3b>(pt8.x, pt8.y)[1] == wanted_val) {
+			imgcopy.at<Vec3b>(pt8.x, pt8.y)[1] = 255 - wanted_val;
+			mystack.push(pt8);
+			blob.push_back(pt8);
+			original.at<Vec3b>(pt8.x, pt8.y)[0] = 0;
+			original.at<Vec3b>(pt8.x, pt8.y)[1] = 0;
+			original.at<Vec3b>(pt8.x, pt8.y)[2] = 255;
+		}
+	}
+
+
+}
+
+
+
+void tpmatch(Mat& final_display, Point& matchLoc, Mat templ1, Mat templ2, Mat templ3, Mat& cmp, const int& draw_ctr) {
+
+	/// Create the result matrix
+	Mat result1;
+	Mat result2;
+	Mat result3;
+	int result_cols1 = final_display.cols - templ1.cols + 1;
+	int result_rows1 = final_display.rows - templ1.rows + 1;
+	int result_cols2 = final_display.cols - templ2.cols + 1;
+	int result_rows2 = final_display.rows - templ2.rows + 1;
+	int result_cols3 = final_display.cols - templ3.cols + 1;
+	int result_rows3 = final_display.rows - templ3.rows + 1;
+	result1.create(result_rows1, result_cols1, CV_8UC1);
+	result2.create(result_rows2, result_cols2, CV_8UC1);
+	result3.create(result_rows3, result_cols3, CV_8UC1);
+
+	/// Do the Matching and Normalize
+	int match_method = 1;
+	matchTemplate(cmp, templ1, result1, match_method);
+	matchTemplate(cmp, templ2, result2, match_method);
+	matchTemplate(cmp, templ3, result3, match_method);
+	//normalize(result1, result1, 0, 1, NORM_MINMAX, -1, Mat());
+	//normalize(result2, result2, 0, 1, NORM_MINMAX, -1, Mat());
+	//normalize(result3, result3, 0, 1, NORM_MINMAX, -1, Mat());
+
+	/// Localizing the best match with minMaxLoc
+	double minVal1; double maxVal1; Point minLoc1; Point maxLoc1;
+	double minVal2; double maxVal2; Point minLoc2; Point maxLoc2;
+	double minVal3; double maxVal3; Point minLoc3; Point maxLoc3;
+	minMaxLoc(result1, &minVal1, &maxVal1, &minLoc1, &maxLoc1, Mat());
+	minMaxLoc(result2, &minVal2, &maxVal2, &minLoc2, &maxLoc2, Mat());
+	minMaxLoc(result3, &minVal3, &maxVal3, &minLoc3, &maxLoc3, Mat());
+
+	int mid_row = 0;
+	// For SQDIFF and SQDIFF_NORMED, the best matches are lower values. For all the other methods, the higher the better
+	// template 1 is the best match
+	if (minVal1 < minVal2 && minVal1 < minVal3) {
+		mid_row = templ1.rows / 2;
+		matchLoc = minLoc1;
+		//rectangle(final_display, matchLoc, Point(matchLoc.x + templ1.cols, matchLoc.y + templ1.rows), Scalar::all(255), 2, 8, 0);
+		if (draw_ctr == 1)
+		rectangle(cmp, matchLoc, Point(matchLoc.x + templ1.cols, matchLoc.y + templ1.rows), Scalar::all(255), 2, 8, 0);
+	}
+	// template 2 is the best match
+	else if (minVal2 < minVal1 && minVal2 < minVal3) {
+		mid_row = templ2.rows / 2;
+		matchLoc = minLoc2;
+		//rectangle(final_display, matchLoc, Point(matchLoc.x + templ2.cols, matchLoc.y + templ2.rows), Scalar::all(255), 2, 8, 0);
+		if (draw_ctr == 1)
+		rectangle(cmp, matchLoc, Point(matchLoc.x + templ2.cols, matchLoc.y + templ2.rows), Scalar::all(255), 2, 8, 0);
+	}
+	// template 3 is the best match
+	else {
+		mid_row = templ3.rows / 2;
+		matchLoc = minLoc3;
+		//rectangle(final_display, matchLoc, Point(matchLoc.x + templ3.cols, matchLoc.y + templ3.rows), Scalar::all(255), 2, 8, 0);
+		if (draw_ctr == 1)
+		rectangle(cmp, matchLoc, Point(matchLoc.x + templ3.cols, matchLoc.y + templ3.rows), Scalar::all(255), 2, 8, 0);
+	}
+	int temp = matchLoc.x;
+	matchLoc.x = matchLoc.y;
+	matchLoc.y = temp;
+	matchLoc.x = matchLoc.x + mid_row*2/3;
+	int fontFace = FONT_HERSHEY_COMPLEX_SMALL;
+	double fontScale = 1.5;
+	int thickness = 2;
+	Point textOrg(final_display.cols / 3, final_display.rows / 20);
+	string myText[4] = { "Clockwise", "Counterclockwise", "push", "pull" };
+	putText(final_display, myText[0], textOrg, fontFace, fontScale, Scalar::all(0), thickness, 8);
+
+}
+
+
+
+
+
+
+
+// ************************************************************************************************************** //
+
+void findBoundingBox(const Mat& src, Mat& rst, Rect& box, int threshold) {
+
+	rst = Mat::zeros(src.size(), CV_8UC1);
+	int maxlength = 0;
+	int maxidbegin, maxidend;
+	int curridbegin;
+	int maxheight = 0;
+	int b = 0;
+	int g = 0;
+	int r = 0;
+	int nb, ng, nr;
+	int currlength = 0;
+	vector<int> myv1;
+	vector<int> myv2;
+	box.x = 0, box.y = 0, box.width = 0, box.height = 0;
+
+	for (int i = 0; i < src.rows; i++) {
+		maxlength = 0;
+		currlength = 0;
+		maxidbegin = 0;
+		curridbegin = 0;
+		maxidend = 0;
+		for (int j = 0; j < src.cols - 1; j++) {
+			b = src.at<Vec3b>(i, j)[0];
+			g = src.at<Vec3b>(i, j)[1];
+			r = src.at<Vec3b>(i, j)[2];
+			nb = src.at<Vec3b>(i, j + 1)[0];
+			ng = src.at<Vec3b>(i, j + 1)[1];
+			nr = src.at<Vec3b>(i, j + 1)[2];
+			int currhue, nexthue;
+			int a, b;
+			convertHSL(b, g, r, currhue, a, b);
+			convertHSL(nb, ng, nr, nexthue, a, b);
+			int diffhue = abs(currhue - nexthue);
+			if (diffhue < threshold) {
+				currlength++;
+				if (currlength >= maxlength) {
+					maxidbegin = curridbegin;
+					maxlength = currlength;
+					maxidend = j;
+				}
+			}
+			else {
+				curridbegin = j;
+				currlength = 0;
+			}
+		}
+		rst.at<uchar>(i, maxidbegin) = 255;
+		myv1.push_back(maxidbegin);
+		rst.at<uchar>(i, maxidend) = 255;
+		myv2.push_back(maxidend);
+
+	}
+	int avg1 = 0, avg2 = 0, histoHeightMax = 0;
+
+	for (int c = 0; c < myv1.size(); c++) {
+		avg1 += myv1[c];
+	}
+	for (int c = 0.3*src.rows; c < myv1.size()*0.7; c++) {
+		avg2 += myv2[c];
+	}
+	box.y = avg1 / myv1.size();
+	box.width = avg2 / (myv2.size()*0.4) - box.y;
+	/*
+	for (int j = 0; j < src.cols; j++) {
+	maxlength = 0;
+	currlength = 0;
+	maxidbegin = 0;
+	curridbegin = 0;
+	maxidend = 0;
+	for (int i = 0; i < src.rows-1; i++) {
+	b = src.at<Vec3b>(i, j)[0];
+	g = src.at<Vec3b>(i, j)[1];
+	r = src.at<Vec3b>(i, j)[2];
+	nb = src.at<Vec3b>(i+1, j)[0];
+	ng = src.at<Vec3b>(i+1, j)[1];
+	nr = src.at<Vec3b>(i+1, j)[2];
+	if ((abs(nb - b) < threshold) && (abs(ng - g) < threshold) && (abs(nr - r) < threshold)) {
+	currlength++;
+	if (currlength >= maxlength) {
+	maxidbegin = curridbegin;
+	maxlength = currlength;
+	maxidend = i;
+	}
+	}
+	else {
+	curridbegin = i;
+	currlength = 0;
+	}
+	}
+	rst.at<uchar>( maxidbegin, j) = 255;
+	rst.at<uchar>( maxidend, j) = 255;
+
+	// Update the output rect if the width is the longest
+	if (maxlength > box.height) {
+	box.height = maxlength;
+	box.x = maxidbegin;
+	}
+	}*/
+	box.height = src.rows;
+
+}
+
+void BoxHandle(const Mat& img, Point& start, Point& end) {
+	int top = img.rows * 0.3;
+	int bot = img.rows * 0.7;
+	int white = 0;
+	for (int i = top; i < bot; i++) {
+		for (int j = 0; j < img.cols; j++) {
+			if (img.at<uchar>(i, j) == 255)
+				white++;
+		}
+	}
+	white = white / (0.4*img.rows);
+	int maxwidth = 0; bool first = true; int rowlast = 0;
+	for (int i = top; i < bot; i++) {
+		int fkrow = 0;
+		for (int j = 0; j < img.cols; j++) {
+			if (img.at<uchar>(i, j) == 255) {
+				fkrow++;
+				rowlast = j;
+			}
+		}
+		if (fkrow > white && first) {
+			first = false;
+			end.y = rowlast;
+			start.x = i;
+		}
+		if (fkrow > maxwidth)
+			maxwidth = fkrow;
+	}
+	start.y = end.y - maxwidth;
+	for (int i = bot; i > top; i--) {
+		int fkrow = 0;
+		for (int j = 0; j < img.cols; j++) {
+			if (img.at<uchar>(i, j) == 255)
+				fkrow++;
+		}
+		if (fkrow > white) {
+			end.x = i;
+			break;
+		}
+	}
+}
+
+void myrect(Mat &img, Point matchLoc, Point endLoc, int r, int g, int b, int thick) {
+
+	for (int i = matchLoc.x; i < endLoc.x; i++) {
+		for (int t = 0; t < thick; t++) {
+			img.at<Vec3b>(i, matchLoc.y + t)[0] = b;
+			img.at<Vec3b>(i, matchLoc.y + t)[1] = g;
+			img.at<Vec3b>(i, matchLoc.y + t)[2] = r;
+			img.at<Vec3b>(i, endLoc.y - 1 - t)[0] = b;
+			img.at<Vec3b>(i, endLoc.y - 1 - t)[1] = g;
+			img.at<Vec3b>(i, endLoc.y - 1 - t)[2] = r;
+		}
+	}
+	for (int j = matchLoc.y; j < endLoc.y; j++) {
+		for (int t = 0; t < thick; t++) {
+			img.at<Vec3b>(matchLoc.x + t, j)[0] = b;
+			img.at<Vec3b>(matchLoc.x + t, j)[1] = g;
+			img.at<Vec3b>(matchLoc.x + t, j)[2] = r;
+			img.at<Vec3b>(endLoc.x - 1 - t, j)[0] = b;
+			img.at<Vec3b>(endLoc.x - 1 - t, j)[1] = g;
+			img.at<Vec3b>(endLoc.x - 1 - t, j)[2] = r;
+		}
+	}
+}
+
+void myfindconnected(const Mat &img, vector <vector<Point2i>> &blobs, vector<Rect> &regions) {
+	blobs.clear();
+
+	Mat imgcopy;
+	img.copyTo(imgcopy);
+	unsigned char wanted_val = 0;
+	stack<Point2i> mystack;
+
+	for (int i = 0; i < imgcopy.rows; i++) {
+		for (int j = 0; j < imgcopy.cols; j++) {
+			if (imgcopy.ptr<uchar>(i)[j] == wanted_val) {
+				//cout << "i=" << i << "\t j=" << j << "\t";
+				vector <Point2i> blob;
+				int localminx = i; int localmaxx = i;
+				int localminy = j; int localmaxy = j;
+				imgcopy.at<uchar>(i, j) = 255 - wanted_val;
+				Point2i myp;
+				myp.x = i;
+				myp.y = j;
+				mystack.push(myp);
+				blob.push_back(myp);
+
+				int size = 1;
+				Point2i pt1, pt2, pt3, pt4, pt5, pt6, pt7, pt8, pt9;
+				while (!mystack.empty()) {
+					pt5 = mystack.top();
+					mystack.pop();
+					if (pt5.x > 0) {
+						pt1.x = pt5.x - 1;
+						pt2.x = pt5.x - 1;
+						pt3.x = pt5.x - 1;
+					}
+					else {
+						pt1.x = pt5.x;
+						pt2.x = pt5.x;
+						pt3.x = pt5.x;
+					}
+					if (pt5.x < imgcopy.rows - 1) {
+						pt7.x = pt5.x + 1;
+						pt8.x = pt5.x + 1;
+						pt9.x = pt5.x + 1;
+					}
+					else {
+						pt7.x = pt5.x;
+						pt8.x = pt5.x;
+						pt9.x = pt5.x;
+					}
+					if (pt5.y > 0) {
+						pt1.y = pt5.y - 1;
+						pt4.y = pt5.y - 1;
+						pt7.y = pt5.y - 1;
+					}
+					else {
+						pt1.y = pt5.y;
+						pt4.y = pt5.y;
+						pt7.y = pt5.y;
+					}
+					if (pt5.y < imgcopy.cols - 1) {
+						pt3.y = pt5.y + 1;
+						pt6.y = pt5.y + 1;
+						pt9.y = pt5.y + 1;
+					}
+					else {
+						pt3.y = pt5.y;
+						pt6.y = pt5.y;
+						pt9.y = pt5.y;
+					}
+					pt4.x = pt5.x;			pt2.y = pt5.y;
+					pt6.x = pt5.x;			pt8.y = pt5.y;
+					if (pt5.x < localminx)
+						localminx = pt5.x;
+					if (pt5.y < localminy)
+						localminy = pt5.y;
+					if (pt5.x > localmaxx)
+						localmaxx = pt5.x;
+					if (pt5.y > localmaxy)
+						localmaxy = pt5.y;
+					if (imgcopy.at<uchar>(pt1.x, pt1.y) == wanted_val) {
+						imgcopy.at<uchar>(pt1.x, pt1.y) = 255 - wanted_val;
+						mystack.push(pt1);
+						blob.push_back(pt1);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt2.x, pt2.y) == wanted_val) {
+						imgcopy.at<uchar>(pt2.x, pt2.y) = 255 - wanted_val;
+						mystack.push(pt2);
+						blob.push_back(pt2);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt3.x, pt3.y) == wanted_val) {
+						imgcopy.at<uchar>(pt3.x, pt3.y) = 255 - wanted_val;
+						mystack.push(pt3);
+						blob.push_back(pt3);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt4.x, pt4.y) == wanted_val) {
+						imgcopy.at<uchar>(pt4.x, pt4.y) = 255 - wanted_val;
+						mystack.push(pt4);
+						blob.push_back(pt4);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt6.x, pt6.y) == wanted_val) {
+						imgcopy.at<uchar>(pt6.x, pt6.y) = 255 - wanted_val;
+						mystack.push(pt6);
+						blob.push_back(pt6);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt7.x, pt7.y) == wanted_val) {
+						imgcopy.at<uchar>(pt7.x, pt7.y) = 255 - wanted_val;
+						mystack.push(pt7);
+						blob.push_back(pt7);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt8.x, pt8.y) == wanted_val) {
+						imgcopy.at<uchar>(pt8.x, pt8.y) = 255 - wanted_val;
+						mystack.push(pt8);
+						blob.push_back(pt8);
+						size++;
+					}
+					if (imgcopy.at<uchar>(pt9.x, pt9.y) == wanted_val) {
+						imgcopy.at<uchar>(pt9.x, pt9.y) = 255 - wanted_val;
+						mystack.push(pt9);
+						blob.push_back(pt9);
+						size++;
+					}
+				}
+				Rect region;
+				region.x = localminx; region.y = localminy;
+				region.width = localmaxy - localminy + 1;
+				region.height = localmaxx - localminx + 1;
+				regions.push_back(region);
+
+				//cout << "blob size=" << size << endl;;
+				//store the blob in the vector of blobs
+				blobs.push_back(blob);
+
+			}
+		}
+	}
+	cout << "total connected components found (including very small regions) =" << blobs.size() << endl;
+	//namedWindow("Trial");
+	//imshow("Trial", imgcopy);
+
+}
+
+// ************************************************************************************************************** //
